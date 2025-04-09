@@ -10,11 +10,11 @@ import java.util.stream.Stream;
 public class Main {
 
     public static void main(String[] args) throws Exception {
-        // --- Schritt 1: Logdateien generieren ---
+        // Logdateien generieren
         LogGenerator generator = new LogGenerator(5, "logs", LocalDate.now().minusDays(4), 10, 50);
         generator.generateLogs();
 
-        // --- Schritt 2: Sequentielle Analyse ---
+        // Sequentielle Analyse
         System.out.println("\nSequentielle Analyse:");
         long startSequential = System.currentTimeMillis();
         Map<String, Integer> totalSequential = new HashMap<>();
@@ -29,8 +29,8 @@ public class Main {
         System.out.println("Gesamtergebnis (sequentiell): " + totalSequential);
         System.out.println("Zeit (sequentiell): " + (endSequential - startSequential) + " ms");
 
-        // --- Schritt 3: Parallele Analyse ---
-        System.out.println("\nParallele Analyse:");
+        // paralelle Analyse
+        System.out.println("\nParallele Analyse (LogLevel-Zählung):");
         ExecutorService executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
         List<Future<Map<String, Integer>>> futures = new ArrayList<>();
 
@@ -48,10 +48,35 @@ public class Main {
             mergeCounts(totalParallel, result);
         }
         long endParallel = System.currentTimeMillis();
-        executor.shutdown();
-
         System.out.println("Gesamtergebnis (parallel): " + totalParallel);
         System.out.println("Zeit (parallel): " + (endParallel - startParallel) + " ms");
+
+        // erweiterte Fehleranalyse
+        System.out.println("\nErweiterte Fehleranalyse (WARN/ERROR + Fehlertypen):");
+        List<Future<ErrorAnalysisResult>> errorFutures = new ArrayList<>();
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(Paths.get("."), "logs-*.log")) {
+            for (Path path : stream) {
+                errorFutures.add(executor.submit(new ErrorLogAnalyzerTask(path)));
+            }
+        }
+
+        Map<String, Integer> totalLevels = new HashMap<>();
+        Map<String, Integer> totalErrorTypes = new HashMap<>();
+
+        for (Future<ErrorAnalysisResult> future : errorFutures) {
+            ErrorAnalysisResult result = future.get();
+            mergeCounts(totalLevels, result.levelCounts);
+            mergeCounts(totalErrorTypes, result.errorTypes);
+
+            System.out.println("LogLevel-Zählung: " + result.levelCounts);
+            System.out.println("WARN/ERROR-Zeilen (max 5):");
+            result.warnAndErrorLines.stream().limit(5).forEach(System.out::println);
+            System.out.println("---");
+        }
+
+        executor.shutdown();
+        System.out.println("Gesamtergebnis LogLevel: " + totalLevels);
+        System.out.println("Fehlertypen-Zählung: " + totalErrorTypes);
     }
 
     public static Map<String, Integer> analyzeLogFile(Path path) {
@@ -87,6 +112,54 @@ public class Main {
         @Override
         public Map<String, Integer> call() {
             return analyzeLogFile(file);
+        }
+    }
+
+    public static class ErrorAnalysisResult {
+        public final Map<String, Integer> levelCounts;
+        public final List<String> warnAndErrorLines;
+        public final Map<String, Integer> errorTypes;
+
+        public ErrorAnalysisResult(Map<String, Integer> levelCounts, List<String> warnAndErrorLines, Map<String, Integer> errorTypes) {
+            this.levelCounts = levelCounts;
+            this.warnAndErrorLines = warnAndErrorLines;
+            this.errorTypes = errorTypes;
+        }
+    }
+
+    public static class ErrorLogAnalyzerTask implements Callable<ErrorAnalysisResult> {
+        private final Path file;
+
+        public ErrorLogAnalyzerTask(Path file) {
+            this.file = file;
+        }
+
+        @Override
+        public ErrorAnalysisResult call() throws Exception {
+            Map<String, Integer> levelCount = new HashMap<>();
+            List<String> errorLines = new ArrayList<>();
+            Map<String, Integer> errorTypes = new HashMap<>();
+            List<String> knownErrors = List.of("NullPointerException", "FileNotFoundException", "SQLException", "OutOfMemoryError", "IllegalArgumentException", "ArrayIndexOutOfBoundsException", "SecurityException");
+
+            try (Stream<String> lines = Files.lines(file)) {
+                lines.forEach(line -> {
+                    for (String level : List.of("TRACE", "DEBUG", "INFO", "WARN", "ERROR")) {
+                        if (line.contains(" " + level + " ")) {
+                            levelCount.merge(level, 1, Integer::sum);
+                            if (level.equals("WARN") || level.equals("ERROR")) {
+                                errorLines.add(line);
+                                for (String keyword : knownErrors) {
+                                    if (line.contains(keyword)) {
+                                        errorTypes.merge(keyword, 1, Integer::sum);
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+            return new ErrorAnalysisResult(levelCount, errorLines, errorTypes);
         }
     }
 }
